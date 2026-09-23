@@ -40,6 +40,18 @@
   .seg-btn{flex:1;text-align:center;padding:.5rem .5rem;border-radius:9px;font-size:.8rem;font-weight:500;white-space:nowrap}
   .seg-btn.active{background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.08)}
   .seg-wrap{background:var(--accent-light);border-radius:11px;padding:3px;display:flex;gap:2px}
+
+  .onboard-overlay{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;
+    z-index:9999;padding:2rem;text-align:center;padding-top:calc(2rem + env(safe-area-inset-top,0px));
+    padding-bottom:calc(2rem + env(safe-area-inset-bottom,0px))}
+  .onboard-out{animation:onboardFadeOut .8s ease forwards}
+  .onboard-in{animation:onboardFadeIn 1.6s ease forwards}
+  .app-fade-in{animation:onboardFadeIn .8s ease forwards}
+  @keyframes onboardFadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes onboardFadeOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-4px)}}
+  @media (prefers-reduced-motion: reduce){
+    .onboard-out,.onboard-in,.app-fade-in,.fade-in{animation:none !important}
+  }
 </style>
 </head>
 <body>
@@ -49,8 +61,13 @@
 const state = {
   input: "", environment: "Unknown", area: "", errorMsg: "",
   screen: "input", loadingStep: 0, ticket: null, showAbout: false, showInfoError: null,
-  view: "engineering"
+  view: "engineering", showHowItWorks: false
 };
+
+// ---- Onboarding: plays on every load/refresh by design — no persistence, no "seen" flag ----
+const PREFERS_REDUCED_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+const ONBOARD_TIMING = PREFERS_REDUCED_MOTION ? { hold: 400 } : { hold: 2800 };
+state.onboarding = { active: true, leaving: false };
 
 // ============================================================
 // Reproduction-step extraction (dedicated, rule-based).
@@ -367,24 +384,97 @@ function generateBugTicket(input, environment, area, errorMsgField){
 function render(){
   const app = document.getElementById('app');
   app.innerHTML = `
-    ${Nav()}
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-      ${InputPanel()}
-      ${ResultPanel()}
+    <div class="${state.onboarding.active ? '' : 'app-fade-in'}">
+      ${Nav()}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+        <div class="flex flex-col gap-4">
+          ${InputPanel()}
+        </div>
+        ${ResultPanel()}
+      </div>
+      ${Footer()}
     </div>
-    ${Footer()}
     ${state.showAbout ? AboutModal() : ""}
+    ${state.showHowItWorks ? HowItWorksModal() : ""}
+    ${state.onboarding.active ? OnboardingOverlay() : ""}
   `;
   attachHandlers();
+  if(state.onboarding.active) attachOnboardingHandlers();
+}
+
+function OnboardingOverlay(){
+  const cls = state.onboarding.leaving ? "onboard-out" : "onboard-in";
+  return `
+  <div class="onboard-overlay">
+    <div class="${cls}">
+      <div class="text-3xl sm:text-4xl font-semibold tracking-tight mb-2">🐞 BUGGER</div>
+      <div class="muted text-sm sm:text-base">Turn messy bug reports into structured, actionable tickets.</div>
+    </div>
+    <button id="skipIntro" class="fixed text-xs muted underline" style="bottom:calc(1.5rem + env(safe-area-inset-bottom,0px)); right:1.5rem;">Skip intro →</button>
+  </div>`;
+}
+
+function attachOnboardingHandlers(){
+  const skipBtn = document.getElementById('skipIntro');
+  if(skipBtn) skipBtn.addEventListener('click', ()=>{
+    if(state.onboarding.leaving) return;
+    state.onboarding.leaving = true;
+    render();
+    setTimeout(finishOnboarding, PREFERS_REDUCED_MOTION ? 50 : 800);
+  });
+}
+
+function startOnboarding(){
+  if(!state.onboarding.active){ render(); return; }
+  render();
+  setTimeout(()=>{
+    if(!state.onboarding.active) return;
+    state.onboarding.leaving = true;
+    render();
+    setTimeout(finishOnboarding, PREFERS_REDUCED_MOTION ? 50 : 800);
+  }, ONBOARD_TIMING.hold);
+}
+function finishOnboarding(){
+  if(!state.onboarding.active) return;
+  state.onboarding.active = false;
+  render();
+}
+
+const HOW_IT_WORKS_STEPS = [
+  ["01","Describe the bug","Describe the bug in your own words. You don't need to format it like a formal ticket."],
+  ["02","Generate","Bugger turns your messy report into a structured bug ticket and identifies information that is missing."],
+  ["03","Review","Switch between Product View and Engineering View to see the same bug from different perspectives."],
+  ["04","Edit & Copy","Review the generated draft, make any necessary edits, then copy the ticket or copy it for Jira."]
+];
+function howToStep(n,t,d){
+  return `<div class="flex gap-3 text-left">
+    <div class="text-xs font-mono muted mt-0.5">${n}</div>
+    <div><div class="text-sm font-medium">${t}</div><div class="text-xs muted mt-0.5">${d}</div></div>
+  </div>`;
+}
+function HowItWorksModal(){
+  return `
+  <div id="howItWorksBg" class="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+    <div class="card p-6 max-w-md w-full max-h-[85vh] overflow-y-auto fade-in">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="font-semibold text-sm tracking-wide">HOW TO USE BUGGER</h3>
+        <button id="closeHowItWorks" class="muted" aria-label="Close">✕</button>
+      </div>
+      <div class="space-y-4">
+        ${HOW_IT_WORKS_STEPS.map(s=>howToStep(s[0],s[1],s[2])).join("")}
+      </div>
+    </div>
+  </div>`;
 }
 
 function Nav(){
   return `
-  <div class="flex items-center justify-between">
+  <div class="flex items-start justify-between gap-3">
     <div>
       <div class="text-xl font-semibold tracking-tight">🐞 Bugger <span class="muted font-normal text-base">— Bug → Better Ticket</span></div>
       <div class="muted text-sm mt-1">Turn messy bug reports into engineering-ready tickets.</div>
     </div>
+    <button id="howItWorksBtn" class="text-xs muted underline whitespace-nowrap mt-1">How It Works</button>
   </div>`;
 }
 
@@ -469,7 +559,6 @@ function Ticket(t){
       <div class="flex items-center gap-2 flex-wrap">
         <h2 class="font-medium">Generated Bug Ticket</h2>
         <span class="text-xs px-2 py-0.5 rounded-full" style="background:var(--accent-light);color:var(--accent)">Draft</span>
-        <span class="text-[11px] px-2 py-0.5 rounded-full border muted" style="border-color:var(--border)">🤖 AI-generated draft — verify before submitting</span>
       </div>
     </div>
     <div class="flex gap-2 flex-wrap mb-4 mt-2">
@@ -751,6 +840,13 @@ function attachHandlers(){
   const modalBg = document.getElementById('modalBg');
   if(modalBg) modalBg.addEventListener('click', e=>{ if(e.target.id==='modalBg'){ state.showAbout=false; render(); }});
 
+  const howItWorksBtn = document.getElementById('howItWorksBtn');
+  if(howItWorksBtn) howItWorksBtn.addEventListener('click', ()=>{ state.showHowItWorks = true; render(); });
+  const closeHowItWorks = document.getElementById('closeHowItWorks');
+  if(closeHowItWorks) closeHowItWorks.addEventListener('click', ()=>{ state.showHowItWorks=false; render(); });
+  const howItWorksBg = document.getElementById('howItWorksBg');
+  if(howItWorksBg) howItWorksBg.addEventListener('click', e=>{ if(e.target.id==='howItWorksBg'){ state.showHowItWorks=false; render(); }});
+
   const viewEng = document.getElementById('viewEngineering');
   if(viewEng) viewEng.addEventListener('click', ()=>{ if(state.view!=='engineering'){ state.view='engineering'; render(); } });
   const viewProd = document.getElementById('viewProduct');
@@ -808,7 +904,7 @@ function toMarkdown(t){
   return `# ${t.title}
 
 **Status:** Draft | **Severity:** ${t.severity} | **Priority:** ${t.priority}
-*AI-generated draft — verify before submitting. Quality score: ${t.qualityScore}/100 (based on completeness of the original report).*
+*Quality score: ${t.qualityScore}/100 (based on completeness of the original report).*
 
 ## Engineering View
 
@@ -868,7 +964,7 @@ function toJira(t){
   return `h1. ${t.title}
 
 *Severity:* ${t.severity} | *Priority:* ${t.priority}
-_AI-generated draft — verify before submitting. Quality score: ${t.qualityScore}/100._
+_Quality score: ${t.qualityScore}/100._
 
 h2. Engineering View
 
@@ -934,7 +1030,7 @@ function copyText(text, btnId){
   }).catch(()=>{});
 }
 
-render();
+startOnboarding();
 </script>
 </body>
 </html>
