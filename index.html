@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bugger — Bug to Better Ticket</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root{
+    --bg:#fafafa; --card:#ffffff; --border:#e5e7eb; --text:#111827; --muted:#6b7280;
+    --accent:#4f46e5; --accent-light:#eef2ff; --amber:#f59e0b; --amber-bg:#fffbeb; --amber-border:#fde68a;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0b0b0f; --card:#151519; --border:#26262e; --text:#f3f4f6; --muted:#9ca3af;
+      --accent:#818cf8; --accent-light:#1e1b3a; --amber:#fbbf24; --amber-bg:#231b08; --amber-border:#453207;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0b0b0f; --card:#151519; --border:#26262e; --text:#f3f4f6; --muted:#9ca3af;
+    --accent:#818cf8; --accent-light:#1e1b3a; --amber:#fbbf24; --amber-bg:#231b08; --amber-border:#453207;
+  }
+  *{box-sizing:border-box}
+  html{scroll-padding-top:env(safe-area-inset-top,0px)}
+  body{background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;
+    padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);margin:0}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px}
+  textarea,input,select{background:var(--card);border:1px solid var(--border);color:var(--text)}
+  textarea:focus,input:focus,select:focus{outline:2px solid var(--accent);outline-offset:1px}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-primary:hover{opacity:.9}
+  .btn-primary:disabled{opacity:.6;cursor:not-allowed}
+  .btn-secondary{background:var(--card);border:1px solid var(--border);color:var(--text)}
+  .btn-secondary:hover{background:var(--accent-light)}
+  .amber-box{background:var(--amber-bg);border:1px solid var(--amber-border)}
+  .muted{color:var(--muted)}
+  .fade-in{animation:fadeIn .3s ease}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+  ::placeholder{color:var(--muted)}
+  .seg-btn{flex:1;text-align:center;padding:.5rem .5rem;border-radius:9px;font-size:.8rem;font-weight:500;white-space:nowrap}
+  .seg-btn.active{background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+  .seg-wrap{background:var(--accent-light);border-radius:11px;padding:3px;display:flex;gap:2px}
+</style>
+</head>
+<body>
+<div id="app" class="max-w-7xl mx-auto px-4 sm:px-6 py-6"></div>
+
+<script>
+const state = {
+  input: "", environment: "Unknown", area: "", errorMsg: "",
+  screen: "input", loadingStep: 0, ticket: null, showAbout: false, showInfoError: null,
+  view: "engineering"
+};
+
+// ============================================================
+// Reproduction-step extraction (dedicated, rule-based).
+// Never invents actions. Left untouched from prior iteration.
+// ============================================================
+function splitClauses(s){
+  return s.replace(/,|\band\b/gi, ",").split(",").map(c=>c.trim()).filter(Boolean);
+}
+const ACTION_VERB_LIST = [
+  "navigate\\s+to","go\\s+to","log\\s+in\\s+to","log\\s+into","log\\s+in","sign\\s+in",
+  "navigate","open","click","tap","press","select","choose","upload","download","enter","type",
+  "submit","save","delete","remove","add","create","update","edit","search","filter","sort",
+  "export","import","connect","sync","login","signin","scroll","drag","refresh",
+  "try(?:\\s+to)?","attempt(?:\\s+to)?","run","execute","send","visit","switch","toggle",
+  "check","fill","paste","copy","initiate","start","begin"
+];
+const ACTION_VERB_REGEX = new RegExp("^(" + ACTION_VERB_LIST.join("|") + ")\\b", "i");
+const VERB_MAP = {
+  "go to":"Navigate to","navigate to":"Navigate to","navigate":"Navigate to",
+  "click":"Select","tap":"Select","press":"Select","select":"Select","choose":"Select",
+  "open":"Open","upload":"Upload","download":"Download","enter":"Enter","type":"Enter",
+  "submit":"Submit","save":"Save","delete":"Delete","remove":"Remove","add":"Add","create":"Create",
+  "update":"Update","edit":"Edit","search":"Search","filter":"Filter","sort":"Sort","export":"Export",
+  "import":"Import","connect":"Connect","sync":"Sync","log in":"Log in","login":"Log in","log into":"Log in to",
+  "log in to":"Log in to","sign in":"Sign in","signin":"Sign in","scroll":"Scroll","drag":"Drag",
+  "refresh":"Refresh","try":"Attempt","try to":"Attempt","attempt":"Attempt","attempt to":"Attempt",
+  "run":"Run","execute":"Run","send":"Send","visit":"Visit","switch":"Switch","toggle":"Toggle",
+  "check":"Check","fill":"Fill","paste":"Paste","copy":"Copy","initiate":"Initiate","start":"Start","begin":"Start"
+};
+function normalizeVerb(v){
+  const key = v.toLowerCase().replace(/\s+/g," ").trim();
+  return VERB_MAP[key] || (v.charAt(0).toUpperCase()+v.slice(1));
+}
+const VAGUE_OBJECTS = ["stuff","something","things","it","that","this","them","anything","everything"];
+function toImperative(clause){
+  clause = clause.trim();
+  const m = clause.match(ACTION_VERB_REGEX);
+  if(!m) return null;
+  let rest = clause.slice(m[0].length).trim().replace(/^to\s+/i,"").replace(/[.,!?]+$/,"").trim();
+  const normVerb = normalizeVerb(m[1]);
+  if(!rest) return normVerb + ".";
+  if(VAGUE_OBJECTS.includes(rest.toLowerCase())) return null;
+  return `${normVerb} ${rest}.`;
+}
+const WHEN_PATTERN = /\b(?:when|if|whenever)\s+(?:the\s+)?(?:users?|i|they|customers?|clients?|someone)\s+(?:try to |attempt to |tries to |attempts to )?([a-zA-Z][^,.]*)/i;
+const ERROR_KEYWORDS = /(error|fail(?:s|ing|ed)?|exception|crash(?:es)?|timeout|times out|broken|freeze(?:s)?|stuck)/i;
+function buildObserveStep(s){
+  let m = s.match(/\b(?:a|an|the)?\s*(\d{3})\s*error\b/i);
+  if(m) return `Observe the ${m[1]} error.`;
+  m = s.match(/\b(?:a|an|the)?\s*([\w-]+)\s+(error|failure|exception|crash|timeout)\b/i);
+  if(m) return `Observe the ${m[1].toLowerCase()} ${m[2].toLowerCase()}.`;
+  if(/\berror\b/i.test(s)) return "Observe the error.";
+  if(/\bfails?\b|\bfailing\b|\bfailed\b/i.test(s)) return "Observe the failure.";
+  if(/\bcrash(es)?\b/i.test(s)) return "Observe the crash.";
+  if(/timeout|times out/i.test(s)) return "Observe the timeout.";
+  return "Observe the reported issue.";
+}
+function extractReproductionSteps(input){
+  const rawSentences = input.replace(/\n/g," ").split(/(?<=[.!?])\s+/)
+    .map(s=>s.replace(/[.!?]+$/,"").trim()).filter(Boolean);
+  let steps = [];
+  let sawExplicitAction = false;
+  for(const s of rawSentences){
+    const clauses = splitClauses(s);
+    let anyClauseAction = false;
+    for(const c of clauses){
+      if(ACTION_VERB_REGEX.test(c)){
+        const imp = toImperative(c);
+        if(imp){ steps.push(imp); sawExplicitAction = true; anyClauseAction = true; }
+      }
+    }
+    if(!anyClauseAction){
+      const wm = s.match(WHEN_PATTERN);
+      if(wm){
+        const imp = toImperative(wm[1]);
+        if(imp){ steps.push(imp); sawExplicitAction = true; }
+      }
+    }
+  }
+  if(sawExplicitAction){
+    let observeStep = null;
+    for(const s of rawSentences){
+      if(ERROR_KEYWORDS.test(s)){ observeStep = buildObserveStep(s); break; }
+    }
+    if(observeStep && !steps.some(st => st.toLowerCase().startsWith("observe"))){
+      steps.push(observeStep);
+    }
+  }
+  if(!sawExplicitAction || steps.length === 0){
+    return { steps: [], status: "insufficient_information", confidence: "insufficient" };
+  }
+  const status = steps.length >= 2 ? "complete" : "partial";
+  const confidence = steps.length >= 3 ? "high" : steps.length === 2 ? "medium" : "low";
+  return { steps, status, confidence };
+}
+
+// ============================================================
+// Field-level inference helpers. Every one of these either
+// grounds its output in the report text or falls back to an
+// explicit "not specified / needs review" state — never a
+// generic invented default.
+// ============================================================
+const EXPECTED_TEMPLATES = {
+  upload: "The file should upload successfully.",
+  download: "The file should download successfully.",
+  save: "The changes should save successfully.",
+  submit: "The form should submit successfully.",
+  sync: "The data should sync successfully.",
+  connect: "The connection should complete successfully.",
+  export: "The export should complete successfully.",
+  import: "The import should complete successfully.",
+  send: "The message should send successfully.",
+  login: "The user should be able to log in successfully.",
+  signin: "The user should be able to sign in successfully."
+};
+function detectMentionedVerb(input){
+  const lower = input.toLowerCase();
+  for(const key of Object.keys(EXPECTED_TEMPLATES)){
+    const pattern = key==='login' ? /\blog\s*in\b/ : key==='signin' ? /\bsign\s*in\b/ : new RegExp(`\\b${key}(?:ing|ed|s)?\\b`,'i');
+    if(pattern.test(lower)) return key;
+  }
+  return null;
+}
+function inferExpectedBehavior(repro){
+  if(repro.status === "insufficient_information") return null;
+  const combined = repro.steps.join(" ").toLowerCase();
+  for(const key of Object.keys(EXPECTED_TEMPLATES)){
+    const pattern = key==='login' ? /\blog\s*in\b/ : key==='signin' ? /\bsign\s*in\b/ : new RegExp(`\\b${key}\\b`,'i');
+    if(pattern.test(combined)) return EXPECTED_TEMPLATES[key];
+  }
+  return null;
+}
+function detectEnvironment(input, envParam){
+  if(envParam && envParam !== "Unknown") return envParam;
+  const lower = input.toLowerCase();
+  if(/\bproduction\b|\bprod\b/.test(lower)) return "Production";
+  if(/\bstaging\b/.test(lower)) return "Staging";
+  if(/\bdevelopment\b|\bdev environment\b/.test(lower)) return "Development";
+  return null;
+}
+function extractErrorMessage(input, errorMsgField){
+  if(errorMsgField && errorMsgField.trim()) return errorMsgField.trim();
+  let m = input.match(/\b([1-5]\d{2})\b\s*(?:error)?/i);
+  if(m) return `HTTP ${m[1]}`;
+  m = input.match(/(?:error|exception)\s*[:\-]?\s*["“]([^"”]+)["”]/i);
+  if(m) return m[1];
+  return "";
+}
+function hasFileDetails(input){ return /\bcsv\b|\.csv|\.pdf|\.png|\.jpg|\.jpeg|\.xlsx|\.docx/i.test(input) || /\d+\s?(mb|kb|gb)/i.test(input); }
+function hasEndpoint(input, area){ return /\/[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-\/]*/.test(input) || !!(area && area.trim()); }
+function hasFrequency(input){ return /\b(consistently|always|every time|intermittently|sometimes|randomly|occasionally)\b/i.test(input); }
+function hasImpact(input){ return /\b(\d+%|\d+\s+users?|\d+\s+customers?|all users|some users|many users)\b/i.test(input); }
+function hasWorkaroundMention(input){ return /\bworkaround\b/i.test(input); }
+function hasTimingMention(input){ return /\b(today|yesterday|since|started|last week|this morning|after)\b/i.test(input); }
+function hasDeploymentMention(input){ return /\bdeploy(ment|ed)?\b|\brelease(d)?\b/i.test(input); }
+function firstMatchSentence(input, regex){
+  const m = input.match(regex);
+  return m ? m[0].trim().replace(/[.]+$/,"")+"." : null;
+}
+function extractTroubleshooting(input){
+  const sentences = input.replace(/\n/g," ").split(/(?<=[.!?])\s+/).map(s=>s.trim());
+  for(const s of sentences){
+    if(/\b(tried|attempted|refreshed|restarted|reinstalled|cleared|reset)\b/i.test(s) && /\b(didn'?t|did not|doesn'?t|does not)\b/i.test(s)){
+      return s.replace(/[.]+$/,"") + ".";
+    }
+  }
+  return null;
+}
+function inferSeverityPriority(input, environment, repro){
+  const lower = input.toLowerCase();
+  let severity = null, severityReason = null;
+  if(/\b(critical|outage|\bdown\b|all users|entire|complete failure|data loss)\b/i.test(lower)){
+    severity = "Critical"; severityReason = "Report indicates a critical or blocking impact.";
+  } else if(environment === "Production" && /consistently|every time|always/i.test(lower)){
+    severity = "High"; severityReason = "Production environment with consistent reproduction.";
+  }
+  // Note: environment being "Production" alone is not treated as evidence of severity —
+  // without a stated frequency/impact, severity stays "Needs review".
+  let priority = null, priorityReason = null;
+  if(severity === "Critical"){ priority = "P0"; priorityReason = "Critical severity warrants immediate attention."; }
+  else if(severity === "High"){ priority = "P1"; priorityReason = "High severity, confirmed in production."; }
+  return {
+    severity: severity || "Needs review",
+    severityReason: severityReason || "Insufficient information to determine user impact.",
+    priority: priority || "Needs review",
+    priorityReason: priorityReason || "Insufficient information to determine urgency."
+  };
+}
+function buildMissingInformation(input, area, environment, errorMessage, expectedBehavior){
+  const qs = [];
+  const verb = detectMentionedVerb(input);
+  if(!hasEndpoint(input, area)) qs.push("What API endpoint or feature are you using?");
+  if(!errorMessage) qs.push("What exact error message or HTTP status code do you receive?");
+  if(!environment) qs.push("Which environment is affected?");
+  if(verb === 'upload' && !hasFileDetails(input)) qs.push("What type and size of file are you uploading?");
+  if(!hasFrequency(input)) qs.push("Can the issue be reproduced consistently?");
+  if(!expectedBehavior) qs.push(`What should happen when the ${verb || "reported action"} succeeds?`);
+  if(!hasImpact(input)) qs.push("How many users or requests are affected?");
+  return qs;
+}
+function buildQualityScore(input, repro, expectedBehavior, errorMessage, environment, area){
+  const checks = [
+    {text:"Problem described", ok:true, w:20},
+    {text:"Approximate timing provided", ok:hasTimingMention(input), w:15},
+    {text:"Reproduction steps", ok: repro.status === "complete", w:15},
+    {text:"Expected behavior", ok: !!expectedBehavior, w:15},
+    {text:"Exact error/status code", ok: !!errorMessage, w:10},
+    {text:"Environment specified", ok: !!environment, w:10},
+    {text:"Endpoint/feature identified", ok: hasEndpoint(input, area), w:5},
+    {text:"User impact quantified", ok: hasImpact(input), w:5},
+    {text:"Reproduction frequency stated", ok: hasFrequency(input), w:5}
+  ];
+  const score = checks.reduce((sum,c)=> sum + (c.ok ? c.w : 0), 0);
+  return { score, checks };
+}
+function extractConfirmedInformation(input, environment, errorMessage, repro, troubleshooting){
+  const facts = [];
+  if(environment) facts.push(`Environment: ${environment}.`);
+  if(errorMessage) facts.push(`Error: ${errorMessage}.`);
+  if(repro.status !== "insufficient_information") facts.push(`${repro.steps.length} reproduction step(s) identified from the report.`);
+  if(hasTimingMention(input)) facts.push("Approximate timing of onset was reported.");
+  if(hasFrequency(input)) facts.push("Reproducibility/frequency was described.");
+  if(troubleshooting) facts.push(`Known troubleshooting: ${troubleshooting}`);
+  return facts;
+}
+function buildAcceptanceCriteria(expected, errorMessage, repro){
+  if(!expected || repro.status === "insufficient_information") return [];
+  const ac = [expected];
+  if(errorMessage) ac.push(`The reported error (${errorMessage}) should no longer occur.`);
+  ac.push("The fix should be verified in the affected environment.");
+  return ac;
+}
+function buildProductImpact(input){
+  if(!hasImpact(input)) return "Impact not specified";
+  const s = firstMatchSentence(input, /[^.!?]*\b(\d+%|\d+\s+users?|\d+\s+customers?|all users|some users|many users)\b[^.!?]*/i);
+  return s || "Impact not specified";
+}
+function buildProductArea(input, area){
+  if(area && area.trim()) return area.trim();
+  const STOPWORDS = /^(the|a|an|this|that|my|our|some|many|all|is|it|no)$/i;
+  const m = input.match(/\b([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)?)\s+(connector|integration|API|checkout|dashboard|service|gateway|module|sync|page|feature)\b/);
+  if(m){
+    const words = m[1].split(/\s+/).filter(w => !STOPWORDS.test(w));
+    if(words.length > 0) return `${words.join(" ")} ${m[2]}`;
+  }
+  return "Not specified";
+}
+function buildOpenQuestions(input, repro){
+  const qs = [];
+  if(!hasImpact(input)) qs.push("How many users are affected?");
+  if(!hasWorkaroundMention(input)) qs.push("Is there a workaround?");
+  if(repro.status === "insufficient_information" || !hasFrequency(input)) qs.push("Is the issue reproducible?");
+  if(!hasTimingMention(input)) qs.push("When did the issue begin?");
+  if(!hasDeploymentMention(input)) qs.push("Was there a recent deployment?");
+  qs.push("Is this blocking a critical workflow?");
+  return qs;
+}
+function buildSuccessCriteria(expected){ return expected || "Needs clarification"; }
+
+// ============================================================
+// Main generation function — one path for every input, so the
+// demo example is held to the same honesty standard as any
+// real report typed in by a user.
+// ============================================================
+function generateBugTicket(input, environment, area, errorMsgField){
+  const repro = extractReproductionSteps(input);
+  const env = detectEnvironment(input, environment);
+  const errorMessage = extractErrorMessage(input, errorMsgField);
+  const expectedBehavior = inferExpectedBehavior(repro);
+  const sevpri = inferSeverityPriority(input, env, repro);
+  const troubleshooting = extractTroubleshooting(input);
+
+  const rawSentences = input.replace(/\n/g," ").split(/(?<=[.!?])\s+/).map(s=>s.trim()).filter(s=>s.length>0);
+  const isMeta = s => /^(please|can you|could you|need|pls|thanks|thank you|help|kindly)\b/i.test(s) || /\bplease fix\b/i.test(s);
+  const descriptive = rawSentences.filter(s => !isMeta(s));
+  const firstSentence = descriptive[0] || rawSentences[0] || input.slice(0,60);
+  const title = firstSentence.length > 70 ? firstSentence.slice(0,67)+"..." : firstSentence;
+  const actualBehavior = descriptive.find(s => ERROR_KEYWORDS.test(s) && s !== firstSentence)
+    || descriptive[0]
+    || "The reported issue occurs as described.";
+
+  const missingInformation = buildMissingInformation(input, area, env, errorMessage, expectedBehavior);
+  const q = buildQualityScore(input, repro, expectedBehavior, errorMessage, env, area);
+  const confirmedInformation = extractConfirmedInformation(input, env, errorMessage, repro, troubleshooting);
+  const acceptanceCriteria = buildAcceptanceCriteria(expectedBehavior, errorMessage, repro);
+
+  return {
+    title: title.charAt(0).toUpperCase()+title.slice(1),
+    summary: input.length > 220 ? input.slice(0,217)+"..." : input,
+    stepsToReproduce: repro.steps,
+    reproductionStepsStatus: repro.status,
+    reproductionStepsConfidence: repro.confidence,
+    expectedBehavior: expectedBehavior || "Not specified",
+    actualBehavior,
+    environment: env || "Not specified",
+    errorMessage: errorMessage || "Not provided",
+    severity: sevpri.severity, severityReason: sevpri.severityReason,
+    priority: sevpri.priority, priorityReason: sevpri.priorityReason,
+    confirmedInformation,
+    missingInformation,
+    acceptanceCriteria,
+    qualityScore: q.score,
+    qualityChecks: q.checks,
+    productImpact: buildProductImpact(input),
+    productArea: buildProductArea(input, area),
+    openQuestions: buildOpenQuestions(input, repro),
+    successCriteria: buildSuccessCriteria(expectedBehavior)
+  };
+}
+
+// ============================================================
+// Rendering
+// ============================================================
+function render(){
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    ${Nav()}
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+      ${InputPanel()}
+      ${ResultPanel()}
+    </div>
+    ${Footer()}
+    ${state.showAbout ? AboutModal() : ""}
+  `;
+  attachHandlers();
+}
+
+function Nav(){
+  return `
+  <div class="flex items-center justify-between">
+    <div>
+      <div class="text-xl font-semibold tracking-tight">🐞 Bugger <span class="muted font-normal text-base">— Bug → Better Ticket</span></div>
+      <div class="muted text-sm mt-1">Turn messy bug reports into engineering-ready tickets.</div>
+    </div>
+  </div>`;
+}
+
+function InputPanel(){
+  const count = state.input.length;
+  const isLoading = state.screen === "loading";
+  return `
+  <div class="card p-5 fade-in">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-medium">Describe the bug</h2>
+      <button id="tryExample" class="text-sm px-3 py-1.5 rounded-lg btn-secondary" ${isLoading?"disabled":""}>Try an example</button>
+    </div>
+    <textarea id="bugInput" rows="7" class="w-full rounded-lg p-3 text-sm" placeholder="Example: Users are getting logged out when they try to upload a CSV..." ${isLoading?"disabled":""}>${escapeHtml(state.input)}</textarea>
+    <div class="text-xs muted mt-1 mb-4" id="charCount">${count} characters</div>
+    <div class="text-sm font-medium mb-2">Optional details</div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+      <div>
+        <label class="text-xs muted block mb-1">Environment</label>
+        <select id="envSelect" class="w-full rounded-lg p-2 text-sm" ${isLoading?"disabled":""}>
+          ${["Production","Staging","Development","Unknown"].map(o=>`<option ${state.environment===o?"selected":""}>${o}</option>`).join("")}
+        </select>
+      </div>
+      <div>
+        <label class="text-xs muted block mb-1">Product / Area</label>
+        <input id="areaInput" class="w-full rounded-lg p-2 text-sm" placeholder="e.g. Checkout" value="${escapeAttr(state.area)}" ${isLoading?"disabled":""}>
+      </div>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs muted block mb-1">Error message</label>
+      <input id="errInput" class="w-full rounded-lg p-2 text-sm" placeholder="Paste any error text here" value="${escapeAttr(state.errorMsg)}" ${isLoading?"disabled":""}>
+    </div>
+    ${state.showInfoError ? `<div class="text-sm text-red-500 mb-3">${escapeHtml(state.showInfoError)}</div>` : ""}
+    <button id="createBtn" class="w-full py-2.5 rounded-lg btn-primary font-medium text-sm" ${isLoading?"disabled":""}>${isLoading ? loadingLabel() : "✨ Create Better Ticket"}</button>
+  </div>`;
+}
+
+function loadingLabel(){
+  return ["Analyzing bug report...","Structuring the report...","Checking for missing information..."][state.loadingStep] || "Working...";
+}
+
+function ResultPanel(){
+  if(state.screen === "input"){
+    return `
+    <div class="card p-8 fade-in flex flex-col items-center justify-center text-center">
+      <div class="muted mb-6">Your improved ticket will appear here</div>
+      <div class="grid grid-cols-1 gap-4 w-full max-w-sm text-left">
+        ${benefit("01","Structure","Turn unstructured descriptions into clear bug reports.")}
+        ${benefit("02","Clarity","Separate symptoms, expected behavior, and actual behavior.")}
+        ${benefit("03","Completeness","Identify information engineering still needs.")}
+      </div>
+    </div>`;
+  }
+  if(state.screen === "loading"){
+    return `
+    <div class="card p-8 fade-in flex flex-col items-center justify-center text-center min-h-[300px]">
+      <div class="animate-pulse text-sm font-medium">${loadingLabel()}</div>
+    </div>`;
+  }
+  if(state.screen === "result" && state.ticket){
+    return Ticket(state.ticket);
+  }
+  // fallback error state — should not normally occur
+  return `
+  <div class="card p-8 fade-in flex flex-col items-center justify-center text-center">
+    <div class="muted mb-3">Something went wrong generating the ticket.</div>
+    <button id="startOver" class="text-sm px-3 py-1.5 rounded-lg btn-secondary">Start Over</button>
+  </div>`;
+}
+
+function benefit(n,t,d){
+  return `<div class="flex gap-3">
+    <div class="text-xs font-mono muted mt-0.5">${n}</div>
+    <div><div class="text-sm font-medium">${t}</div><div class="text-xs muted mt-0.5">${d}</div></div>
+  </div>`;
+}
+
+// ---- Ticket shell: header, trust badge, view switcher, quality score, then the active view ----
+function Ticket(t){
+  return `
+  <div class="card p-5 fade-in">
+    <div class="flex items-center justify-between mb-1 flex-wrap gap-y-1">
+      <div class="flex items-center gap-2 flex-wrap">
+        <h2 class="font-medium">Generated Bug Ticket</h2>
+        <span class="text-xs px-2 py-0.5 rounded-full" style="background:var(--accent-light);color:var(--accent)">Draft</span>
+        <span class="text-[11px] px-2 py-0.5 rounded-full border muted" style="border-color:var(--border)">🤖 AI-generated draft — verify before submitting</span>
+      </div>
+    </div>
+    <div class="flex gap-2 flex-wrap mb-4 mt-2">
+      <button id="copyTicket" class="text-xs px-2.5 py-1.5 rounded-lg btn-secondary">Copy Ticket</button>
+      <button id="copyJira" class="text-xs px-2.5 py-1.5 rounded-lg btn-secondary">Copy for Jira</button>
+      <span class="text-xs muted self-center">Jira integration coming soon.</span>
+      <button id="startOver" class="text-xs px-2.5 py-1.5 rounded-lg btn-secondary ml-auto">Start Over</button>
+    </div>
+
+    <input id="ticketTitle" class="w-full font-semibold text-base rounded-lg p-2 mb-3" value="${escapeAttr(t.title)}">
+
+    <div class="card p-3 mb-4" style="background:var(--accent-light);border-color:var(--border)">
+      <div class="flex items-center justify-between">
+        <div class="text-xs font-medium">Ticket Quality</div>
+        <div class="text-lg font-semibold">${t.qualityScore}<span class="text-xs font-normal muted"> / 100</span></div>
+      </div>
+      <div class="text-[11px] muted mt-0.5">Based on completeness of the original report.</div>
+    </div>
+
+    <div class="seg-wrap mb-4" role="tablist" aria-label="Ticket view">
+      <button id="viewEngineering" class="seg-btn ${state.view==='engineering'?'active':''}">Engineering View</button>
+      <button id="viewProduct" class="seg-btn ${state.view==='product'?'active':''}">Product View</button>
+    </div>
+
+    ${state.view === 'engineering' ? EngineeringView(t) : ProductView(t)}
+
+    <details class="text-sm mt-4">
+      <summary class="cursor-pointer font-medium muted">Why this ticket is better</summary>
+      <ul class="mt-2 space-y-2 text-sm">
+        <li><b>Separates confirmed facts from open questions</b> — nothing is presented as known unless the report actually said so.</li>
+        <li><b>Separates expected vs actual behavior</b> — makes it easier for engineering to understand the failure.</li>
+        <li><b>Two perspectives, one dataset</b> — engineering gets reproduction detail, product gets impact and prioritization framing.</li>
+        <li><b>Never fabricates reproduction steps or severity</b> — an incomplete ticket is safer than an inaccurate one.</li>
+      </ul>
+    </details>
+  </div>`;
+}
+
+function EngineeringView(t){
+  return `
+  <div class="fade-in">
+    <div class="mb-3">
+      <div class="text-xs font-medium muted mb-1">Problem Summary</div>
+      <textarea id="ticketSummary" rows="2" class="w-full rounded-lg p-2 text-sm">${escapeHtml(t.summary)}</textarea>
+    </div>
+
+    <div class="mb-3">
+      <div class="text-xs font-medium muted mb-1">Steps to Reproduce</div>
+      ${t.reproductionStepsStatus === "insufficient_information" ? `
+        <div class="amber-box rounded-lg p-3 text-sm">
+          <div class="font-medium" style="color:var(--amber)">⚠️ Insufficient information</div>
+          <div class="muted mt-1">The report doesn't contain enough information to determine how to reproduce the issue.</div>
+        </div>` : `
+        <div id="stepsList" class="space-y-1.5">
+          ${t.stepsToReproduce.map((s,i)=>stepRow(s,i)).join("")}
+        </div>`}
+      <button id="addStep" class="text-xs mt-1.5 text-indigo-500">+ Add step</button>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+      <div><div class="text-xs font-medium muted mb-1">Expected Behavior</div>
+        <textarea id="ticketExpected" rows="2" class="w-full rounded-lg p-2 text-sm">${escapeHtml(t.expectedBehavior)}</textarea></div>
+      <div><div class="text-xs font-medium muted mb-1">Actual Behavior</div>
+        <textarea id="ticketActual" rows="2" class="w-full rounded-lg p-2 text-sm">${escapeHtml(t.actualBehavior)}</textarea></div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 mb-4">
+      <div><div class="text-xs font-medium muted mb-1">Environment</div><div class="text-sm p-2 rounded-lg border" style="border-color:var(--border)">${escapeHtml(t.environment)}</div></div>
+      <div><div class="text-xs font-medium muted mb-1">Error</div><div class="text-sm p-2 rounded-lg border truncate" style="border-color:var(--border)" title="${escapeAttr(t.errorMessage)}">${escapeHtml(t.errorMessage)}</div></div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 mb-4">
+      <div><div class="text-xs font-medium muted mb-1">Severity</div><div class="text-sm p-2 rounded-lg border" style="border-color:var(--border)">${escapeHtml(t.severity)}</div></div>
+      <div><div class="text-xs font-medium muted mb-1">Priority</div><div class="text-sm p-2 rounded-lg border" style="border-color:var(--border)">${escapeHtml(t.priority)}</div></div>
+    </div>
+    <div class="text-[11px] muted -mt-3 mb-4">Editable from Product View — both views share the same ticket data.</div>
+
+    <div class="mb-4">
+      <div class="text-xs font-medium muted mb-1">Confirmed Information</div>
+      ${t.confirmedInformation.length ? `
+        <ul class="text-sm space-y-1">${t.confirmedInformation.map(c=>`<li>✓ ${escapeHtml(c)}</li>`).join("")}</ul>
+      ` : `<div class="text-sm muted">No specific facts confirmed yet beyond the problem description.</div>`}
+    </div>
+
+    <div class="amber-box rounded-lg p-3 mb-4">
+      <div class="text-xs font-medium mb-2" style="color:var(--amber)">⚠ Information Needed</div>
+      <div id="missingList" class="space-y-1.5">
+        ${t.missingInformation.map((m,i)=>missingRow(m,i)).join("")}
+      </div>
+      <button id="addInfo" class="text-xs mt-1.5" style="color:var(--amber)">+ Add information</button>
+    </div>
+
+    <div class="mb-1">
+      <div class="text-xs font-medium muted mb-1">Acceptance Criteria</div>
+      ${t.acceptanceCriteria.length ? `
+        <div id="acList" class="space-y-1.5">
+          ${t.acceptanceCriteria.map((a,i)=>acRow(a,i)).join("")}
+        </div>` : `<div class="text-sm muted">Needs clarification — not enough confirmed information to derive acceptance criteria yet.</div>`}
+    </div>
+  </div>`;
+}
+
+function ProductView(t){
+  const severityOptions = ["Needs review","Critical","High","Medium","Low"];
+  const priorityOptions = ["Needs review","P0","P1","P2","P3"];
+  return `
+  <div class="fade-in">
+    <div class="mb-3">
+      <div class="text-xs font-medium muted mb-1">Problem</div>
+      <div class="text-sm p-2 rounded-lg border" style="border-color:var(--border)">${escapeHtml(t.actualBehavior)}</div>
+    </div>
+
+    <div class="mb-3">
+      <div class="text-xs font-medium muted mb-1">Product Area</div>
+      <div class="text-sm p-2 rounded-lg border" style="border-color:var(--border)">${escapeHtml(t.productArea)}</div>
+    </div>
+
+    <div class="mb-4">
+      <div class="text-xs font-medium muted mb-1">User / Business Impact</div>
+      <div class="text-sm p-2 rounded-lg border mb-2" style="border-color:var(--border)">${escapeHtml(t.productImpact)}</div>
+      ${t.productImpact === "Impact not specified" ? `
+        <div class="amber-box rounded-lg p-3 text-sm">
+          <div class="font-medium" style="color:var(--amber)">⚠ Information needed</div>
+          <ul class="muted mt-1 space-y-0.5">
+            <li>• Who is affected?</li>
+            <li>• How many users are affected?</li>
+            <li>• Is there a workaround?</li>
+            <li>• Is this blocking a critical workflow?</li>
+            <li>• Is revenue or another business process affected?</li>
+          </ul>
+        </div>` : ""}
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+      <div>
+        <div class="text-xs font-medium muted mb-1">Severity</div>
+        <select id="severitySelect" class="w-full rounded-lg p-2 text-sm">${severityOptions.map(o=>`<option ${t.severity===o?"selected":""}>${o}</option>`).join("")}</select>
+        <div class="text-[11px] muted mt-1">Severity reflects the potential impact of the issue. ${escapeHtml(t.severityReason)}</div>
+      </div>
+      <div>
+        <div class="text-xs font-medium muted mb-1">Priority</div>
+        <select id="prioritySelect" class="w-full rounded-lg p-2 text-sm">${priorityOptions.map(o=>`<option ${t.priority===o?"selected":""}>${o}</option>`).join("")}</select>
+        <div class="text-[11px] muted mt-1">Priority reflects how urgently the issue should be addressed. ${escapeHtml(t.priorityReason)}</div>
+      </div>
+    </div>
+
+    <div class="mb-4">
+      <div class="text-xs font-medium muted mb-1">Success Criteria</div>
+      <div class="text-[11px] muted mb-1">What should be true when this issue is resolved?</div>
+      <div class="text-sm p-2 rounded-lg border" style="border-color:var(--border)">${escapeHtml(t.successCriteria)}</div>
+    </div>
+
+    <div class="mb-4">
+      <div class="text-xs font-medium muted mb-1">Open Questions</div>
+      ${t.openQuestions.length ? `
+        <ul class="text-sm space-y-1">${t.openQuestions.map(q=>`<li>• ${escapeHtml(q)}</li>`).join("")}</ul>
+      ` : `<div class="text-sm muted">No open prioritization questions — the report already answers these.</div>`}
+    </div>
+
+    <div class="mb-1">
+      <div class="text-xs font-medium muted mb-1">Confirmed Information</div>
+      ${t.confirmedInformation.length ? `
+        <ul class="text-sm space-y-1">${t.confirmedInformation.map(c=>`<li>✓ ${escapeHtml(c)}</li>`).join("")}</ul>
+      ` : `<div class="text-sm muted">No specific facts confirmed yet beyond the problem description.</div>`}
+    </div>
+  </div>`;
+}
+
+function stepRow(s,i){
+  return `<div class="flex gap-2 items-start">
+    <span class="text-xs muted mt-2 w-4">${i+1}.</span>
+    <input data-idx="${i}" class="step-input flex-1 rounded-lg p-2 text-sm" value="${escapeAttr(s)}">
+  </div>`;
+}
+function missingRow(m,i){
+  return `<div class="flex gap-2 items-start">
+    <span class="text-xs mt-2">•</span>
+    <input data-idx="${i}" class="missing-input flex-1 rounded-lg p-2 text-sm" value="${escapeAttr(m)}">
+  </div>`;
+}
+function acRow(a,i){
+  return `<div class="flex gap-2 items-start">
+    <span class="text-xs mt-2">✓</span>
+    <input data-idx="${i}" class="ac-input flex-1 rounded-lg p-2 text-sm" value="${escapeAttr(a)}">
+  </div>`;
+}
+
+function Footer(){
+  return `
+  <div class="mt-10 pb-4 text-center">
+    <button id="aboutBtn" class="text-xs muted underline">About this MVP</button>
+    <div class="text-xs muted mt-1">Built as a product-thinking prototype by Tanisha Ray</div>
+  </div>`;
+}
+
+function AboutModal(){
+  return `
+  <div id="modalBg" class="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+    <div class="card p-6 max-w-lg w-full max-h-[85vh] overflow-y-auto">
+      <div class="flex justify-between items-center mb-3">
+        <h3 class="font-semibold">About this MVP</h3>
+        <button id="closeModal" class="muted">✕</button>
+      </div>
+      <div class="text-sm space-y-3">
+        <div><b>Problem</b><p class="muted">Bug reports often arrive with incomplete or ambiguous information, creating unnecessary back-and-forth between support, product, and engineering.</p></div>
+        <div><b>Hypothesis</b><p class="muted">Structuring bug reports at the point of submission — and being explicit about what's still unknown — can reduce clarification cycles and improve handoff quality.</p></div>
+        <div><b>MVP</b><p class="muted">Convert free-form bug descriptions into structured tickets with separate Product and Engineering views, while explicitly identifying missing information rather than inventing it.</p></div>
+        <div><b>Future possibilities</b><p class="muted">Jira, Zendesk, and Slack integration; duplicate bug detection; automatic severity suggestions; screenshot analysis; bug analytics; team-specific templates.</p></div>
+        <div><b>Potential success metrics</b><ul class="muted list-disc pl-5">
+          <li>% of reports successfully converted into complete tickets</li>
+          <li>Average ticket quality score</li>
+          <li>Reduction in missing-information follow-ups</li>
+          <li>Time from bug submission to engineering-ready ticket</li>
+          <li>Copy/export rate</li>
+        </ul></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function escapeHtml(s){ return (s==null?"":String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function escapeAttr(s){ return escapeHtml(s); }
+
+function attachHandlers(){
+  const bugInput = document.getElementById('bugInput');
+  if(bugInput) bugInput.addEventListener('input', e=>{
+    state.input = e.target.value;
+    const cc = document.getElementById('charCount');
+    if(cc) cc.textContent = state.input.length+" characters";
+  });
+  const envSelect = document.getElementById('envSelect');
+  if(envSelect) envSelect.addEventListener('change', e=> state.environment = e.target.value);
+  const areaInput = document.getElementById('areaInput');
+  if(areaInput) areaInput.addEventListener('input', e=> state.area = e.target.value);
+  const errInput = document.getElementById('errInput');
+  if(errInput) errInput.addEventListener('input', e=> state.errorMsg = e.target.value);
+
+  const tryExample = document.getElementById('tryExample');
+  if(tryExample) tryExample.addEventListener('click', ()=>{
+    if(state.screen === "loading") return;
+    state.input = "The Shopify connector stopped syncing orders. It was working yesterday. Now some orders fail with a 500 error. I refreshed the connection but that didn't fix it. This is happening in production.";
+    state.environment = "Unknown";
+    state.showInfoError = null;
+    render();
+  });
+
+  const createBtn = document.getElementById('createBtn');
+  if(createBtn) createBtn.addEventListener('click', ()=>{
+    if(state.screen === "loading") return;
+    if(state.input.trim().length === 0){ state.showInfoError = "Tell us what went wrong first."; render(); return; }
+    if(state.input.trim().length < 15){ state.showInfoError = "Add a little more detail so we can create a useful ticket."; render(); return; }
+    state.showInfoError = null;
+    state.screen = "loading"; state.loadingStep = 0;
+    render();
+    const iv = setInterval(()=>{
+      state.loadingStep++;
+      if(state.loadingStep >= 3){
+        clearInterval(iv);
+        try{
+          state.ticket = generateBugTicket(state.input, state.environment, state.area, state.errorMsg);
+          state.view = "engineering";
+          state.screen = "result";
+        } catch(err){
+          state.screen = "input";
+          state.showInfoError = "Something went wrong generating the ticket. Please try again.";
+        }
+        render();
+      } else { render(); }
+    }, 450);
+  });
+
+  const startOver = document.getElementById('startOver');
+  if(startOver) startOver.addEventListener('click', ()=>{ state.screen="input"; state.ticket=null; render(); });
+
+  const aboutBtn = document.getElementById('aboutBtn');
+  if(aboutBtn) aboutBtn.addEventListener('click', ()=>{ state.showAbout = true; render(); });
+  const closeModal = document.getElementById('closeModal');
+  if(closeModal) closeModal.addEventListener('click', ()=>{ state.showAbout=false; render(); });
+  const modalBg = document.getElementById('modalBg');
+  if(modalBg) modalBg.addEventListener('click', e=>{ if(e.target.id==='modalBg'){ state.showAbout=false; render(); }});
+
+  const viewEng = document.getElementById('viewEngineering');
+  if(viewEng) viewEng.addEventListener('click', ()=>{ if(state.view!=='engineering'){ state.view='engineering'; render(); } });
+  const viewProd = document.getElementById('viewProduct');
+  if(viewProd) viewProd.addEventListener('click', ()=>{ if(state.view!=='product'){ state.view='product'; render(); } });
+
+  if(state.screen === "result" && state.ticket){
+    bindTicketFields();
+  }
+}
+
+function bindTicketFields(){
+  const t = state.ticket;
+  const titleEl = document.getElementById('ticketTitle');
+  if(titleEl) titleEl.addEventListener('input', e=> t.title = e.target.value);
+  const summaryEl = document.getElementById('ticketSummary');
+  if(summaryEl) summaryEl.addEventListener('input', e=> t.summary = e.target.value);
+  const expectedEl = document.getElementById('ticketExpected');
+  if(expectedEl) expectedEl.addEventListener('input', e=> t.expectedBehavior = e.target.value);
+  const actualEl = document.getElementById('ticketActual');
+  if(actualEl) actualEl.addEventListener('input', e=> t.actualBehavior = e.target.value);
+  const sevEl = document.getElementById('severitySelect');
+  if(sevEl) sevEl.addEventListener('change', e=> { t.severity = e.target.value; });
+  const priEl = document.getElementById('prioritySelect');
+  if(priEl) priEl.addEventListener('change', e=> { t.priority = e.target.value; });
+
+  document.querySelectorAll('.step-input').forEach(el=> el.addEventListener('input', e=> t.stepsToReproduce[+e.target.dataset.idx] = e.target.value));
+  document.querySelectorAll('.missing-input').forEach(el=> el.addEventListener('input', e=> t.missingInformation[+e.target.dataset.idx] = e.target.value));
+  document.querySelectorAll('.ac-input').forEach(el=> el.addEventListener('input', e=> t.acceptanceCriteria[+e.target.dataset.idx] = e.target.value));
+
+  const addStepBtn = document.getElementById('addStep');
+  if(addStepBtn) addStepBtn.addEventListener('click', ()=>{
+    t.stepsToReproduce.push("");
+    if(t.reproductionStepsStatus === "insufficient_information"){
+      t.reproductionStepsStatus = "partial"; t.reproductionStepsConfidence = "low";
+    }
+    render();
+  });
+  const addInfoBtn = document.getElementById('addInfo');
+  if(addInfoBtn) addInfoBtn.addEventListener('click', ()=>{ t.missingInformation.push(""); render(); });
+
+  const copyTicketBtn = document.getElementById('copyTicket');
+  if(copyTicketBtn) copyTicketBtn.addEventListener('click', ()=> copyText(toMarkdown(t), 'copyTicket'));
+  const copyJiraBtn = document.getElementById('copyJira');
+  if(copyJiraBtn) copyJiraBtn.addEventListener('click', ()=> copyText(toJira(t), 'copyJira'));
+}
+
+function reproSection(t, stepPrefixFn){
+  if(t.reproductionStepsStatus === "insufficient_information"){
+    return "⚠️ Insufficient information — the report doesn't contain enough detail to determine reproduction steps.";
+  }
+  return t.stepsToReproduce.map((s,i)=>stepPrefixFn(s,i)).join("\n");
+}
+
+function toMarkdown(t){
+  return `# ${t.title}
+
+**Status:** Draft | **Severity:** ${t.severity} | **Priority:** ${t.priority}
+*AI-generated draft — verify before submitting. Quality score: ${t.qualityScore}/100 (based on completeness of the original report).*
+
+## Engineering View
+
+### Problem Summary
+${t.summary}
+
+### Steps to Reproduce
+${reproSection(t, (s,i)=>`${i+1}. ${s}`)}
+
+### Expected Behavior
+${t.expectedBehavior}
+
+### Actual Behavior
+${t.actualBehavior}
+
+**Environment:** ${t.environment}
+**Error:** ${t.errorMessage}
+**Severity:** ${t.severity} | **Priority:** ${t.priority}
+
+### Confirmed Information
+${t.confirmedInformation.length ? t.confirmedInformation.map(c=>`- ${c}`).join("\n") : "- None confirmed beyond the problem description."}
+
+### Information Needed
+${t.missingInformation.map(m=>`- ${m}`).join("\n")}
+
+### Acceptance Criteria
+${t.acceptanceCriteria.length ? t.acceptanceCriteria.map(a=>`- [ ] ${a}`).join("\n") : "Needs clarification."}
+
+## Product View
+
+### Problem
+${t.actualBehavior}
+
+### Product Area
+${t.productArea}
+
+### User / Business Impact
+${t.productImpact}
+
+### Severity
+${t.severity} — ${t.severityReason}
+
+### Priority
+${t.priority} — ${t.priorityReason}
+
+### Success Criteria
+${t.successCriteria}
+
+### Open Questions
+${t.openQuestions.length ? t.openQuestions.map(q=>`- ${q}`).join("\n") : "- None — the report already answers these."}
+
+### Confirmed Information
+${t.confirmedInformation.length ? t.confirmedInformation.map(c=>`- ${c}`).join("\n") : "- None confirmed beyond the problem description."}
+`;
+}
+function toJira(t){
+  return `h1. ${t.title}
+
+*Severity:* ${t.severity} | *Priority:* ${t.priority}
+_AI-generated draft — verify before submitting. Quality score: ${t.qualityScore}/100._
+
+h2. Engineering View
+
+h3. Problem Summary
+${t.summary}
+
+h3. Steps to Reproduce
+${reproSection(t, (s,i)=>`# ${s}`)}
+
+h3. Expected Behavior
+${t.expectedBehavior}
+
+h3. Actual Behavior
+${t.actualBehavior}
+
+*Environment:* ${t.environment}
+*Error:* ${t.errorMessage}
+*Severity:* ${t.severity} | *Priority:* ${t.priority}
+
+h3. Confirmed Information
+${t.confirmedInformation.length ? t.confirmedInformation.map(c=>`* ${c}`).join("\n") : "* None confirmed beyond the problem description."}
+
+h3. Information Needed
+${t.missingInformation.map(m=>`* ${m}`).join("\n")}
+
+h3. Acceptance Criteria
+${t.acceptanceCriteria.length ? t.acceptanceCriteria.map(a=>`* ${a}`).join("\n") : "Needs clarification."}
+
+h2. Product View
+
+h3. Problem
+${t.actualBehavior}
+
+h3. Product Area
+${t.productArea}
+
+h3. User / Business Impact
+${t.productImpact}
+
+h3. Severity
+${t.severity} — ${t.severityReason}
+
+h3. Priority
+${t.priority} — ${t.priorityReason}
+
+h3. Success Criteria
+${t.successCriteria}
+
+h3. Open Questions
+${t.openQuestions.length ? t.openQuestions.map(q=>`* ${q}`).join("\n") : "* None — the report already answers these."}
+
+h3. Confirmed Information
+${t.confirmedInformation.length ? t.confirmedInformation.map(c=>`* ${c}`).join("\n") : "* None confirmed beyond the problem description."}
+`;
+}
+function copyText(text, btnId){
+  navigator.clipboard.writeText(text).then(()=>{
+    const btn = document.getElementById(btnId);
+    if(!btn) return;
+    const orig = btn.textContent;
+    btn.textContent = "Copied!";
+    setTimeout(()=> { if(document.getElementById(btnId)) document.getElementById(btnId).textContent = orig; }, 1200);
+  }).catch(()=>{});
+}
+
+render();
+</script>
+</body>
+</html>

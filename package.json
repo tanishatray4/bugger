@@ -1,0 +1,11 @@
+{
+  "name": "bugger-bug-to-better-ticket",
+  "version": "1.0.0",
+  "description": "A portfolio prototype that turns messy bug reports into structured tickets, shown through Product and Engineering views.",
+  "private": true,
+  "scripts": {
+    "start": "npx serve ."
+  },
+  "author": "Tanisha Ray",
+  "license": "MIT"
+}
